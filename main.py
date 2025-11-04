@@ -6,9 +6,11 @@ import os
 import websockets
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, WebSocket
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.websockets import WebSocketDisconnect
 from pydantic import BaseModel
+from supabase import create_client, Client as SupabaseClient
 from twilio.rest import Client
 from twilio.twiml.voice_response import Connect, VoiceResponse
 
@@ -34,6 +36,8 @@ TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
 NGROK_URL = os.getenv("NGROK_URL")
 PORT = int(os.getenv("PORT", 8000))
+SUPABASE_URL = os.getenv("VITE_SUPABASE_URL")
+SUPABASE_KEY = os.getenv("VITE_SUPABASE_ANON_KEY")
 
 SYSTEM_MESSAGE = load_prompt("system_prompt")
 VOICE = "echo"
@@ -49,11 +53,24 @@ LOG_EVENT_TYPES = [
 
 app = FastAPI()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 if not OPENAI_API_KEY:
     raise ValueError("Missing the OpenAI API key. Please set it in the .env file.")
 
 if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN or not TWILIO_PHONE_NUMBER:
     raise ValueError("Missing Twilio configuration. Please set it in the .env file.")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("Missing Supabase configuration. Please set it in the .env file.")
+
+supabase: SupabaseClient = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
 @app.get("/")
@@ -83,6 +100,13 @@ async def make_call(request: CallRequest):
             recording_status_callback_method="POST",
         )
         print(f"Call initiated with SID: {call.sid}")
+
+        supabase.table("call_logs").insert({
+            "to_phone_number": request.to_phone_number,
+            "call_sid": call.sid,
+            "status": "queued"
+        }).execute()
+
         return {"call_sid": call.sid, "status": "success"}
     except Exception as e:
         print(f"Error initiating call: {e}")
@@ -121,6 +145,15 @@ async def handle_recording_status(request: Request):
     if recording_status == "completed":
         print(f"  Recording URL: {recording_url}")
         print(f"  Duration: {recording_duration} seconds")
+
+        try:
+            supabase.table("call_logs").update({
+                "recording_url": recording_url,
+                "duration": int(recording_duration) if recording_duration else None,
+                "status": "completed"
+            }).eq("call_sid", call_sid).execute()
+        except Exception as e:
+            print(f"Error updating call log: {e}")
 
     return {"status": "received"}
 
